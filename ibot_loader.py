@@ -7,8 +7,71 @@
 import random
 import math
 import numpy as np
+import torch
 
-from torchvision.datasets import ImageFolder
+
+def create_channels(image, mask=None):
+    """
+    Accepts 2-D numpy array and returns original image and the masked image.
+    Returns image with 6 channels:
+        1) Mask Channel: 1 if pixel is masked, 0 otherwise
+        2) Padding Channel: 1 if pixel is from image, 0 if pixel is padding
+        3) Value Channels (4x): Binary encoding of pixel value (1-10)
+    """
+    H, W = image.shape
+    
+    # Initialize channels
+    mask_channel = np.zeros((32, 32), dtype=int)
+    padding_channel = np.zeros((32, 32), dtype=int)
+    
+    # Create binary channels for values
+    num_value_channels = 4
+    value_channels = np.zeros((num_value_channels, 32, 32), dtype=int)
+    
+    # Adjust original values to be from 1-10 instead of 0-9
+    adjusted_image = image + 1
+    
+    # Fill original values and padding
+    padded_image = np.full((32, 32), -1, dtype=int)
+    padded_image[:H, :W] = adjusted_image
+    padding_channel[:H, :W] = 1
+    
+    if mask is not None:
+        mask_channel[:H, :W] = mask
+        padded_image[mask == 1] = 0  # Setting masked values to 0 for binary encoding
+
+    # Convert each value to binary and set the corresponding channels
+    for i in range(32):
+        for j in range(32):
+            if padding_channel[i, j] == 1 and mask_channel[i, j] == 0:
+                binary_value = np.binary_repr(padded_image[i, j], width=num_value_channels)
+                for k, bit in enumerate(binary_value):
+                    value_channels[k, i, j] = int(bit)
+    
+    # Stack channels: first mask, then padding, then value channels
+    original_image_tensor = np.stack([mask_channel, padding_channel] + [value_channels[k] for k in range(num_value_channels)], axis=0)
+    
+    # Masked image: Same process but without the original value where mask is 1
+    masked_padded_image = padded_image.copy()
+    if mask is not None:
+        masked_padded_image[mask == 1] = 0
+    
+    # Convert masked values to binary and set the corresponding channels
+    masked_value_channels = np.zeros((num_value_channels, 32, 32), dtype=int)
+    for i in range(32):
+        for j in range(32):
+            if padding_channel[i, j] == 1:
+                binary_value = np.binary_repr(masked_padded_image[i, j], width=num_value_channels)
+                for k, bit in enumerate(binary_value):
+                    masked_value_channels[k, i, j] = int(bit)
+    
+    masked_image_tensor = np.stack([mask_channel, padding_channel] + [masked_value_channels[k] for k in range(num_value_channels)], axis=0)
+    
+    return torch.tensor(original_image_tensor, dtype=torch.float32), torch.tensor(masked_image_tensor, dtype=torch.float32)
+
+
+
+
 
 class ImageFolderInstance(ImageFolder):
     def __getitem__(self, index):

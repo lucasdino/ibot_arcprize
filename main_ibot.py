@@ -12,6 +12,7 @@ import time
 import math
 import json
 import numpy as np
+import random
 import utils
 import models
 import torch
@@ -158,31 +159,26 @@ def train_ibot(args):
     cudnn.benchmark = True
 
     # ============ preparing data ... ============
+
     transform = DataAugmentationiBOT(
-        args.global_crops_scale,
-        args.local_crops_scale,
         args.global_crops_number,
         args.local_crops_number,
     )
-    pred_size = args.patch_size * 8 if 'swin' in args.arch else args.patch_size
-    dataset = ImageFolderMask(
-        args.data_path, 
-        transform=transform,
-        patch_size=pred_size,
-        pred_ratio=args.pred_ratio,
-        pred_ratio_var=args.pred_ratio_var,
-        pred_aspect_ratio=(0.3, 1/0.3),
-        pred_shape=args.pred_shape,
-        pred_start_epoch=args.pred_start_epoch)
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        sampler=sampler,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
+    # pred_size = args.patch_size * 8 if 'swin' in args.arch else args.patch_size
+    # dataset = ImageFolderMask(
+    #     args.data_path, 
+    #     transform=transform,
+    #     patch_size=pred_size,
+    #     pred_ratio=args.pred_ratio,
+    #     pred_ratio_var=args.pred_ratio_var,
+    #     pred_aspect_ratio=(0.3, 1/0.3),
+    #     pred_shape=args.pred_shape,
+    #     pred_start_epoch=args.pred_start_epoch)
+    # data_loader = torch.utils.data.DataLoader(
+    #     dataset,
+    #     batch_size=args.batch_size_per_gpu,
+    #     pin_memory=True,
+    # )
     print(f"Data loaded: there are {len(dataset)} images.")
 
     # ============ building student and teacher networks ... ============
@@ -572,52 +568,64 @@ class iBOTLoss(nn.Module):
         self.center2 = self.center2 * self.center_momentum2 + patch_center * (1 - self.center_momentum2)
 
 class DataAugmentationiBOT(object):
-    def __init__(self, global_crops_scale, local_crops_scale, global_crops_number, local_crops_number):
-        flip_and_color_jitter = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                p=0.8
-            ),
-            transforms.RandomGrayscale(p=0.2),
-        ])
-        normalize = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-        ])
-
+    """
+        Updated from original iBOT implementation.
+    """
+    def __init__(self, global_crops_number, local_crops_number):
         self.global_crops_number = global_crops_number
-        # transformation for the first global crop
-        self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(1.0),
-            normalize,
-        ])
-        # transformation for the rest of global crops
-        self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(0.1),
-            utils.Solarization(0.2),
-            normalize,
-        ])
-        # transformation for the local crops
         self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(p=0.5),
-            normalize,
-        ])
+
+    def pad_image(self, image):
+        """ 
+            Returns padded image, height, and width.
+        
+            Padded image is 32x32 with padding set to -1, and image is placed in the top left corner.
+        """
+        if isinstance(image, np.ndarray):
+            height, width = image.shape
+        elif isinstance(image, torch.Tensor):
+            height, width = image.size()
+            image = image.numpy()
+        else:
+            raise TypeError("Input must be a 2-D NumPy array or a PyTorch tensor.")
+
+        padded_image = np.full((32, 32), -1, dtype=int)
+        padded_image[:height, :width] = image
+        return padded_image, height, width
+
+    def globalcrop1(self, image):
+        padded_image, height, width = self.pad_image(image)
+        max_shift_y = 32 - height
+        max_shift_x = 32 - width
+        shift_y = random.randint(0, max_shift_y)
+        shift_x = random.randint(0, max_shift_x)
+        transformed_image = np.full((32, 32), -1, dtype=int)
+        transformed_image[shift_y:shift_y + height, shift_x:shift_x + width] = padded_image[:height, :width]
+        return transformed_image
+
+    def globalcrop2(self, image):
+        padded_image, height, width = self.pad_image(image)
+        digits = list(range(10))
+        random.shuffle(digits)
+        mapping = {i: digits[i] for i in range(10)}
+        transformed_image = np.array([[mapping[pixel] if pixel != -1 else -1 for pixel in row] for row in padded_image])
+        return transformed_image
+
+    def localcrop(self, image):
+        """ Placeholder for localcrop, may implement in future. """
+        return image
 
     def __call__(self, image):
+        """ Image must be a 2-D NumPy array or a PyTorch tensor """
+        if not (isinstance(image, np.ndarray) or isinstance(image, torch.Tensor)):
+            raise TypeError("Input must be a 2-D NumPy array or a PyTorch tensor.")
+
         crops = []
-        crops.append(self.global_transfo1(image))
+        crops.append(self.globalcrop1(image))
         for _ in range(self.global_crops_number - 1):
-            crops.append(self.global_transfo2(image))
+            crops.append(self.globalcrop2(image))
         for _ in range(self.local_crops_number):
-            crops.append(self.local_transfo(image))
+            pass      # crops.append(self.localcrop(image))
         return crops
 
 
