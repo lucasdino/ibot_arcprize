@@ -1,1 +1,1 @@
-from .ibot_loader import get_iBOT_Dataloader
+from .ibot_loader import *

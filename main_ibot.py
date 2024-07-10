@@ -29,6 +29,7 @@ from tensorboardX import SummaryWriter
 from models.head import iBOTHead
 from loader import ImageFolderMask
 from evaluation.unsupervised.unsup_cls import eval_pred
+from ibot_loader import get_dataset, iBOT_DatasetWrapper
 
 def get_args_parser():
     parser = argparse.ArgumentParser('iBOT', add_help=False)
@@ -39,22 +40,17 @@ def get_args_parser():
                  'swin_tiny','swin_small', 'swin_base', 'swin_large'],
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
-    parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
-        of input square patches - default 16 (for 16x16 patches). Using smaller
+    parser.add_argument('--patch_size', default=4, type=int, help="""Size in pixels
+        of input square patches - default 4 (for 4x4 patches). Using smaller
         values leads to better performance but requires more memory. Applies only
         for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
     parser.add_argument('--window_size', default=7, type=int, help="""Size of window - default 7.
         This config is only valid for Swin Transofmer and is ignoired for vanilla ViT architectures.""")
-    parser.add_argument('--out_dim', default=8192, type=int, help="""Dimensionality of
+    parser.add_argument('--out_dim', default=128, type=int, help="""Dimensionality of
         output for [CLS] token.""")
-    parser.add_argument('--patch_out_dim', default=8192, type=int, help="""Dimensionality of
+    parser.add_argument('--patch_out_dim', default=128, type=int, help="""Dimensionality of
         output for patch tokens.""")
-    parser.add_argument('--shared_head', default=False, type=utils.bool_flag, help="""Wether to share 
-        the same head for [CLS] token output and patch tokens output. When set to false, patch_out_dim
-        is ignored and enforced to be same with out_dim. (Default: False)""")
-    parser.add_argument('--shared_head_teacher', default=True, type=utils.bool_flag, help="""See above.
-        Only works for teacher model. (Defeault: True)""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
         help="""Whether or not to weight normalize the last layer of the head.
         Not normalizing leads to better performance but can make the training unstable.
@@ -62,10 +58,6 @@ def get_args_parser():
     parser.add_argument('--momentum_teacher', default=0.996, type=float, help="""Base EMA
         parameter for teacher update. The value is increased to 1 during training with cosine schedule.
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
-    parser.add_argument('--norm_in_head', default=None,
-        help="Whether to use batch normalizations in projection head (Default: None)")
-    parser.add_argument('--act_in_head', default='gelu',
-        help="Whether to use batch normalizations in projection head (Default: gelu)")
     parser.add_argument('--use_masked_im_modeling', default=True, type=utils.bool_flag,
         help="Whether to use masked image modeling (mim) in backbone (Default: True)")
     parser.add_argument('--pred_ratio', default=0.3, type=float, nargs='+', help="""Ratio of partial prediction.
@@ -132,6 +124,8 @@ def get_args_parser():
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
         recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
+    parser.add_argument('--pad_to_32', type=bool, default=True, help="""Tell model if you want to pad your image
+        to 32x32 regardless of image size (if True) -- if False, will pad to nearest mult of 4. """)
     parser.add_argument('--local_crops_number', type=int, default=0, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
@@ -140,12 +134,10 @@ def get_args_parser():
         Used for small local view cropping of multi-crop.""")
 
     # Misc
-    parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
-        help='Please specify path to the ImageNet training data.')
-    parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
+    parser.add_argument('--output_dir', default="trained_models/", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--saveckp_freq', default=40, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
-    parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
+    parser.add_argument('--num_workers', default=1, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
@@ -158,28 +150,14 @@ def train_ibot(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
-    # ============ preparing data ... ============
 
-    transform = DataAugmentationiBOT(
-        args.global_crops_number,
-        args.local_crops_number,
-    )
-    # pred_size = args.patch_size * 8 if 'swin' in args.arch else args.patch_size
-    # dataset = ImageFolderMask(
-    #     args.data_path, 
-    #     transform=transform,
-    #     patch_size=pred_size,
-    #     pred_ratio=args.pred_ratio,
-    #     pred_ratio_var=args.pred_ratio_var,
-    #     pred_aspect_ratio=(0.3, 1/0.3),
-    #     pred_shape=args.pred_shape,
-    #     pred_start_epoch=args.pred_start_epoch)
-    # data_loader = torch.utils.data.DataLoader(
-    #     dataset,
-    #     batch_size=args.batch_size_per_gpu,
-    #     pin_memory=True,
-    # )
+    # ============ preparing data ... ============
+    dataset = get_dataset()
+    sampler = torch.utils.data.RandomSampler(dataset)
+    dataset_wrapper = iBOT_DatasetWrapper(dataset, args)
+    data_loader = torch.utils.data.DataLoader(dataset_wrapper, sampler=sampler)
     print(f"Data loaded: there are {len(dataset)} images.")
+
 
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
@@ -219,48 +197,21 @@ def train_ibot(args):
         print(f"Unknow architecture: {args.arch}")
 
     # multi-crop wrapper handles forward with inputs of different resolutions
-    student = utils.MultiCropWrapper(student, iBOTHead(
-        embed_dim,
-        args.out_dim,
-        patch_out_dim=args.patch_out_dim,
-        norm=args.norm_in_head,
-        act=args.act_in_head,
-        norm_last_layer=args.norm_last_layer,
-        shared_head=args.shared_head,
-    ))
-    teacher = utils.MultiCropWrapper(
-        teacher,
-        iBOTHead(
-            embed_dim, 
-            args.out_dim,
-            patch_out_dim=args.patch_out_dim,
-            norm=args.norm_in_head,
-            act=args.act_in_head,
-            shared_head=args.shared_head_teacher,
-        ),
-    )
+    student = utils.MultiCropWrapper(student, None)
+    teacher = utils.MultiCropWrapper(teacher, None)
+
     # move networks to gpu
     student, teacher = student.cuda(), teacher.cuda()
-    # synchronize batch norms (if any)
-    if utils.has_batchnorms(student):
-        student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
-        teacher = nn.SyncBatchNorm.convert_sync_batchnorm(teacher)
-
-        # we need DDP wrapper to have synchro batch norms working...
-        teacher = nn.parallel.DistributedDataParallel(teacher, device_ids=[args.gpu], broadcast_buffers=False) if \
-            'swin' in args.arch else nn.parallel.DistributedDataParallel(teacher, device_ids=[args.gpu])
-        teacher_without_ddp = teacher.module
-    else:
-        # teacher_without_ddp and teacher are the same thing
-        teacher_without_ddp = teacher
-    student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu], broadcast_buffers=False) if \
-        'swin' in args.arch else nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
+    teacher_without_ddp = teacher.module
+    
     # teacher and student start with the same weights
     teacher_without_ddp.load_state_dict(student.module.state_dict(), strict=False)
     # there is no backpropagation through the teacher, so no need for gradients
     for p in teacher.parameters():
         p.requires_grad = False
     print(f"Student and Teacher are built: they are both {args.arch} network.")
+
+
 
     # ============ preparing loss ... ============
     same_dim = args.shared_head or args.shared_head_teacher
@@ -284,6 +235,8 @@ def train_ibot(args):
         local_runs = os.path.join(args.output_dir, 'tf_logs')
         writer = SummaryWriter(logdir=local_runs)
         
+
+        
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
     if args.optimizer == "adamw":
@@ -297,21 +250,23 @@ def train_ibot(args):
     if args.use_fp16:
         fp16_scaler = torch.cuda.amp.GradScaler()
 
+
+
     # ============ init schedulers ... ============
     lr_schedule = utils.cosine_scheduler(
         args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.,  # linear scaling rule
         args.min_lr,
-        args.epochs, len(data_loader),
+        args.epochs, len(dataset_wrapper),
         warmup_epochs=args.warmup_epochs,
     )
     wd_schedule = utils.cosine_scheduler(
         args.weight_decay,
         args.weight_decay_end,
-        args.epochs, len(data_loader),
+        args.epochs, len(dataset_wrapper),
     )
     # momentum parameter is increased to 1. during training with a cosine schedule
     momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1,
-                                            args.epochs, len(data_loader))
+                                            args.epochs, len(dataset_wrapper))
                   
     print(f"Loss, optimizer and schedulers ready.")
 
@@ -337,8 +292,10 @@ def train_ibot(args):
 
         # ============ training one epoch of iBOT ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss,
-            data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
+            ibot_dataloader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
             epoch, fp16_scaler, args)
+        
+        ### NEED TO UPDATE THE TRAIN_ONE_EPOCH FUNCTION to accept the ibot_dataloader
 
         # ============ writing logs ... ============
         save_dict = {

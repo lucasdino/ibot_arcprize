@@ -29,11 +29,11 @@ def get_data_fp():
     return parquet_file
 
 
-
-# ============== Naive dataset / dataloader implementation ================
+# ============== Create our dataset from parquet file ================
 class ParquetDataset(Dataset):
-    def __init__(self, parquet_file):
-        df = pd.read_parquet(parquet_file)
+    def __init__(self, fp):
+        self.fp = fp
+        df = pd.read_parquet(fp)
         self.samples = df['data'].tolist()
         self.tensors = [self.convert_to_tensor(sample) for sample in self.samples]
 
@@ -54,19 +54,11 @@ class ParquetDataset(Dataset):
             raise TypeError(f"Unsupported sample type: {type(sample)}")
 
 
-def get_dataloader(batch_size=1, shuffle=True):
-    """
-        Returns a dataloader object (loads in data from the global var in this file (PARQUET_FILE).
+def get_dataset():
+    fp = get_data_fp()
+    return ParquetDataset(fp)
 
-        All elements in the dataloader object are of type 'tensor' (specifically, 3-D tensor but each has only 2-Ds).
-    """
-    dataset = ParquetDataset(get_data_fp())
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-    print(f"Dataloader of length {len(dataloader)} successfully created from {get_data_fp()}")
-    return dataloader
-
-
-
+            
 # ============== Data Augmenter and iBOT Dataloader ================
 class DataAugmentationiBOT(object):
     """
@@ -140,32 +132,31 @@ class DataAugmentationiBOT(object):
         return crops
 
 
-class iBOT_Dataloader():
-    """ Dataloader wrapper that applies data augmentations / transformations while also loading in our data. """
-    def __init__(self, dataloader, args_dict):
-        self.dataloader = dataloader
-        self.data_iterator = iter(dataloader)
-        self.args = args_dict
-        self.augmenter = DataAugmentationiBOT(2, 0, False)
+class iBOT_DatasetWrapper():
+    """ Dataset wrapper that applies data augmentations / transformations while also loading in our data. """
+    def __init__(self, dataset, args):
+        self.dataset = dataset
+        self.augmenter = DataAugmentationiBOT(args.global_crops_number, args.local_crops_number, args.pad_to_32)
+        
+        self.psz = args.patch_size
+        self.pred_ratio = args.pred_ratio
+        self.pred_ratio_var = args.pred_ratio_var
+        self.pred_start_epoch = args.pred_start_epoch
+        self.pred_shape = args.pred_shape
 
-    def get_data(self):
+
+    def __getitem__(self, index):
         """ 
-            Gets the next grid (from dataloader), augments it, and converts it into channels (6 channels per grid).
+            Gets the next grid (from index), augments it, and converts it into channels (6 channels per grid).
             Returns tuple of (unmasked grid [as 6 channels], masked grid [as 6 channels]).
         """
-        generating = True
-        datum = None
-        
-        while generating:
-            try:
-                datum = next(self.data_iterator)[0]
-                generating = False
-            except StopIteration:
-                self.data_iterator = iter(self.dataloader)
-
+        datum = self.dataset.__getitem__(index)
         aug_data = self.augmenter(datum)
         aug_data = [self._create_channels(d) for d in aug_data]
-        return aug_data
+        return aug_data[0]
+
+    def __len__(self):
+        return len(self.dataloader)
 
     def _generate_mask(self, image):
         """ Placeholder for mask generation function. """
@@ -201,11 +192,3 @@ class iBOT_Dataloader():
         masked_image_tensor = np.stack([mask_channel, padding_channel] + [masked_value_channels[:, :, i] for i in range(num_value_channels)], axis=0)
     
         return (torch.tensor(original_image_tensor, dtype=torch.float32), torch.tensor(masked_image_tensor, dtype=torch.float32))
-
-
-
-# ============== Function to return my iBOT_Dataloader ================
-def get_iBOT_Dataloader(args):
-    dataloader = get_dataloader()
-    ibot_dataloader = iBOT_Dataloader(dataloader, args)
-    return ibot_dataloader

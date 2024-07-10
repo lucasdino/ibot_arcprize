@@ -13,3 +13,4 @@ __pycache__/
 pics/
 !.github/
 !.gitignore
+trained_models/
