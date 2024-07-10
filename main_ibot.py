@@ -567,67 +567,6 @@ class iBOTLoss(nn.Module):
         patch_center = patch_center / (len(teacher_patch) * dist.get_world_size())
         self.center2 = self.center2 * self.center_momentum2 + patch_center * (1 - self.center_momentum2)
 
-class DataAugmentationiBOT(object):
-    """
-        Updated from original iBOT implementation.
-    """
-    def __init__(self, global_crops_number, local_crops_number):
-        self.global_crops_number = global_crops_number
-        self.local_crops_number = local_crops_number
-
-    def pad_image(self, image):
-        """ 
-            Returns padded image, height, and width.
-        
-            Padded image is 32x32 with padding set to -1, and image is placed in the top left corner.
-        """
-        if isinstance(image, np.ndarray):
-            height, width = image.shape
-        elif isinstance(image, torch.Tensor):
-            height, width = image.size()
-            image = image.numpy()
-        else:
-            raise TypeError("Input must be a 2-D NumPy array or a PyTorch tensor.")
-
-        padded_image = np.full((32, 32), -1, dtype=int)
-        padded_image[:height, :width] = image
-        return padded_image, height, width
-
-    def globalcrop1(self, image):
-        padded_image, height, width = self.pad_image(image)
-        max_shift_y = 32 - height
-        max_shift_x = 32 - width
-        shift_y = random.randint(0, max_shift_y)
-        shift_x = random.randint(0, max_shift_x)
-        transformed_image = np.full((32, 32), -1, dtype=int)
-        transformed_image[shift_y:shift_y + height, shift_x:shift_x + width] = padded_image[:height, :width]
-        return transformed_image
-
-    def globalcrop2(self, image):
-        padded_image, height, width = self.pad_image(image)
-        digits = list(range(10))
-        random.shuffle(digits)
-        mapping = {i: digits[i] for i in range(10)}
-        transformed_image = np.array([[mapping[pixel] if pixel != -1 else -1 for pixel in row] for row in padded_image])
-        return transformed_image
-
-    def localcrop(self, image):
-        """ Placeholder for localcrop, may implement in future. """
-        return image
-
-    def __call__(self, image):
-        """ Image must be a 2-D NumPy array or a PyTorch tensor """
-        if not (isinstance(image, np.ndarray) or isinstance(image, torch.Tensor)):
-            raise TypeError("Input must be a 2-D NumPy array or a PyTorch tensor.")
-
-        crops = []
-        crops.append(self.globalcrop1(image))
-        for _ in range(self.global_crops_number - 1):
-            crops.append(self.globalcrop2(image))
-        for _ in range(self.local_crops_number):
-            pass      # crops.append(self.localcrop(image))
-        return crops
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('iBOT', parents=[get_args_parser()])
