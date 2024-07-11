@@ -74,7 +74,7 @@ class Attention(nn.Module):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-
+        
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
@@ -117,7 +117,7 @@ class Block(nn.Module):
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
+    def __init__(self, img_size=32, patch_size=4, in_chans=5, embed_dim=128):
         super().__init__()
         num_patches = (img_size // patch_size) * (img_size // patch_size)
         self.img_size = img_size
@@ -132,7 +132,7 @@ class PatchEmbed(nn.Module):
 
 class VisionTransformer(nn.Module):
     """ Vision Transformer """
-    def __init__(self, img_size=[224], patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
+    def __init__(self, img_size=[32], patch_size=4, in_chans=5, num_classes=0, embed_dim=128, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=partial(nn.LayerNorm, eps=1e-6), return_all_tokens=False, 
                  init_values=0, use_mean_pooling=False, masked_im_modeling=False):
@@ -267,26 +267,26 @@ class VisionTransformer(nn.Module):
         x.permute(0, 2, 3, 1)[mask, :] = self.masked_embed.to(x.dtype)
         return x
 
-def vit_tiny(patch_size=16, **kwargs):
+def vit_tiny(patch_size=4, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
+        patch_size=patch_size, embed_dim=64, depth=12, num_heads=3, mlp_ratio=4,
         qkv_bias=True, **kwargs)
     return model
 
-def vit_small(patch_size=16, **kwargs):
+def vit_small(patch_size=4, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
+        patch_size=patch_size, embed_dim=128, depth=12, num_heads=4, mlp_ratio=4,
         qkv_bias=True, **kwargs)
     return model
 
-def vit_base(patch_size=16, **kwargs):
+def vit_base(patch_size=4, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+        patch_size=patch_size, embed_dim=256, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, **kwargs)
     return model
 
-def vit_large(patch_size=16, **kwargs):
+def vit_large(patch_size=4, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4,
+        patch_size=patch_size, embed_dim=512, depth=24, num_heads=16, mlp_ratio=4,
         qkv_bias=True, **kwargs)
     return model

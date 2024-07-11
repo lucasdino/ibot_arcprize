@@ -192,10 +192,10 @@ def train_ibot(args):
 
     # move networks to gpu
     student, teacher = student.cuda(), teacher.cuda()
-    teacher_without_ddp = teacher.module
+    teacher_without_ddp = teacher
     
     # teacher and student start with the same weights
-    teacher_without_ddp.load_state_dict(student.module.state_dict(), strict=False)
+    teacher_without_ddp.load_state_dict(student.state_dict(), strict=False)
     # there is no backpropagation through the teacher, so no need for gradients
     for p in teacher.parameters():
         p.requires_grad = False
@@ -204,10 +204,9 @@ def train_ibot(args):
 
 
     # ============ preparing loss ... ============
-    same_dim = args.shared_head or args.shared_head_teacher
     ibot_loss = iBOTLoss(
         args.out_dim,
-        args.out_dim if same_dim else args.patch_out_dim,
+        args.out_dim,
         args.global_crops_number,
         args.local_crops_number,
         args.warmup_teacher_temp,
@@ -318,7 +317,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
     
     # common params
     names_q, params_q, names_k, params_k = [], [], [], []
-    for name_q, param_q in student.module.named_parameters():
+    for name_q, param_q in student.named_parameters():
         names_q.append(name_q)
         params_q.append(param_q)
     for name_k, param_k in teacher_without_ddp.named_parameters():
@@ -337,23 +336,26 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
             if i == 0:  # only the first group is regularized
                 param_group["weight_decay"] = wd_schedule[it]
 
-        # move images to gpu
-        images = [im.cuda(non_blocking=True) for im in images]
-        masks = [msk.cuda(non_blocking=True) for msk in masks]        
-        
-        with torch.cuda.amp.autocast(fp16_scaler is not None):
-            # get global views
-            teacher_output = teacher(images[:args.global_crops_number])
-            student_output = student(images[:args.global_crops_number], mask=masks[:args.global_crops_number])
-            
-            # get local views
-            # student.module.backbone.masked_im_modeling = False
-            # student_local_cls = student(images[args.global_crops_number:])[0] if len(images) > args.global_crops_number else None
-            # student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
-            student_local_cls = None
+            # move images to gpu
+            images = [im.cuda(non_blocking=True) for im in images]
+            masks = [msk.cuda(non_blocking=True) for msk in masks]
 
-            all_loss = ibot_loss(student_output, teacher_output, student_local_cls, masks, epoch)
-            loss = all_loss.pop('loss')
+            # Since images and masks are lists of tensors, we need to index the tensor inside the list
+            batched_images = images[0][:args.global_crops_number]
+            batched_masks = masks[0][:args.global_crops_number]
+
+            with torch.cuda.amp.autocast(fp16_scaler is not None):
+                teacher_output = teacher(batched_images)
+                student_output = student(batched_images, mask=batched_masks)
+            
+                # get local views
+                # student.module.backbone.masked_im_modeling = False
+                # student_local_cls = student(images[args.global_crops_number:])[0] if len(images) > args.global_crops_number else None
+                # student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
+                student_local_cls = None
+
+                all_loss = ibot_loss(student_output, teacher_output, student_local_cls, masks, epoch)
+                loss = all_loss.pop('loss')
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -456,23 +458,30 @@ class iBOTLoss(nn.Module):
 
         # [CLS] and patch for global patches
         student_cls = student_cls / self.student_temp
-        student_cls_c = student_cls.chunk(self.ncrops)
         student_patch = student_patch / self.student_temp
-        student_patch_c = student_patch.chunk(self.ngcrops)
+
+        num_chunks = 1  # Ensure this is set to the same value for both teacher and student
+        
+        # Use chunk to ensure equal-sized chunks
+        student_patch_c = torch.chunk(student_patch, num_chunks)
+        teacher_patch_c = torch.chunk(teacher_patch, num_chunks)
         
         # teacher centering and sharpening
         temp = self.teacher_temp_schedule[epoch]
         temp2 = self.teacher_temp2_schedule[epoch]
-        teacher_cls_c = F.softmax((teacher_cls - self.center) / temp, dim=-1)
-        teacher_cls_c = teacher_cls_c.detach().chunk(self.ngcrops)
-        teacher_patch_c = F.softmax((teacher_patch - self.center2) / temp2, dim=-1)
-        teacher_patch_c = teacher_patch_c.detach().chunk(self.ngcrops)
+        teacher_cls_c = F.softmax((teacher_cls - self.center) / temp, dim=-1).detach()
+        teacher_patch_c = F.softmax((teacher_patch - self.center2) / temp2, dim=-1).detach()
+
+        # Split student_cls and teacher_cls as well
+        student_cls_c = torch.chunk(student_cls, num_chunks)
+        teacher_cls_c = torch.chunk(teacher_cls, num_chunks)
 
         total_loss1, n_loss_terms1 = 0, 0
         total_loss2, n_loss_terms2 = 0, 0
         for q in range(len(teacher_cls_c)):
             for v in range(len(student_cls_c)):
                 if v == q:
+                    # Issue is that teach_patch_c != student_patch_c dimensions. Student_patch_c has 2 chunks, teacher_patch_c has 1 chunk.
                     loss2 = torch.sum(-teacher_patch_c[q] * F.log_softmax(student_patch_c[v], dim=-1), dim=-1)
                     mask = student_mask[v].flatten(-2, -1)
                     loss2 = torch.sum(loss2 * mask.float(), dim=-1) / mask.sum(dim=-1).clamp(min=1.0)

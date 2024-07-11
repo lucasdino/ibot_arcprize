@@ -166,7 +166,7 @@ class iBOT_DatasetWrapper():
 
 
     def __len__(self):
-        return len(self.dataloader)
+        return len(self.dataset)
 
     def _generate_mask(self, image):
         """ Placeholder for mask generation function. """
@@ -199,7 +199,7 @@ class iBOT_DatasetWrapper():
         original_image_tensor = original_image_tensor.permute(2, 0, 1)
         mask = mask.permute(2, 0, 1)
         
-        return original_image_tensor.float(), mask.float()
+        return original_image_tensor.float(), mask.int()
 
 def custom_collate_fn(batch):
     """ Custom collate function to return just the batch (list of tuples) rather than concat / stacking into new tensor. """
