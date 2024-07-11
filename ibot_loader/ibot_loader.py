@@ -150,45 +150,57 @@ class iBOT_DatasetWrapper():
             Gets the next grid (from index), augments it, and converts it into channels (6 channels per grid).
             Returns tuple of (unmasked grid [as 6 channels], masked grid [as 6 channels]).
         """
-        datum = self.dataset.__getitem__(index)
-        aug_data = self.augmenter(datum)
-        aug_data = [self._create_channels(d) for d in aug_data]
-        return aug_data[0]
+        data = self.dataset.__getitem__(index)
+        data = self.augmenter(data)  # List of 2-D tensors (32 x 32 or shape based on input grid padded to nearest mult of 4 on both dims)
+        images = []
+        masks = []
+        for d in data:
+            i, m = self._create_channels(d)
+            images.append(i)
+            masks.append(m)
+    
+        images = torch.stack(images)  # Convert list of tensors to a single tensor of shape (n, 5, 32, 32)
+        masks = torch.stack(masks)    # Convert list of tensors to a single tensor of shape (n, 1, 32, 32)
+    
+        return images, masks  # Tuple of tensors
+
 
     def __len__(self):
         return len(self.dataloader)
 
     def _generate_mask(self, image):
         """ Placeholder for mask generation function. """
-        return (image % 2 == 0).int()  # Example: mask even values
+        image = (image % 2 == 0).int()
+        image = image.unsqueeze(-1)
+        return image
 
     def _create_channels(self, image):
         """
-            Accepts list of tensors and returns original image and the masked image.
-            Returns image with 6 channels:
-                1) Mask Channel: 1 if pixel is masked, 0 otherwise
-                2) Padding Channel: 1 if pixel is from image, 0 if pixel is padding
-                3) Value Channels (4x): Binary encoding of pixel value (1-10)
+        Accepts a 2-D torch tensor and returns tuple of original image (e.g., 5 x 32 x 32) with 5 channels and the mask with 1 channel (e.g., 1 x 32 x 32).
+        The original image contains:
+            1) Padding Channel: 1 if pixel is from image, 0 if pixel is padding
+            2) Value Channels (4x): Binary encoding of pixel value (1-10)
+        The mask contains:
+            1) Mask Channel: 1 if pixel is masked, 0 otherwise
         """
-        H, W = image.shape if isinstance(image, np.ndarray) else image.size()
-        image = image + 1  # Adjust values from 0-9 to 1-10
-    
+        H, W = image.shape  # 2-D tensor; 32x32 if pad_to_32=True, else next largest multiple of 4 for each dim
         mask = self._generate_mask(image)
         
-        padded_image = np.full((H, W), -1, dtype=int)
-        padded_image[:H, :W] = image
-        padded_image[mask == 1] = -2  # Apply mask
+        # In 'image', all values that are -1 are 'padding'. Set padding channel using this information
+        padding_channel = (image != -1).int().unsqueeze(-1)
+        image = image + 1  # Add 1 to each -- so now padding is 0 and all int colors are 1-10 (incl.)
         
-        mask_channel = mask.numpy() if isinstance(mask, torch.Tensor) else mask
-        padding_channel = np.ones((H, W), dtype=int)
-    
+        # Convert to binary (4 channels)
         num_value_channels = 4
-        value_channels = np.unpackbits(np.uint8(padded_image.clip(0, 15))[:, :, np.newaxis], axis=2)[:, :, -num_value_channels:]
+        value_channels = ((image.unsqueeze(-1).byte() >> torch.arange(num_value_channels)) & 1)
+        original_image_tensor = torch.cat((padding_channel, value_channels), dim=-1)
         
-        original_image_tensor = np.stack([mask_channel, padding_channel] + [value_channels[:, :, i] for i in range(num_value_channels)], axis=0)
+        # Permute to get the desired shape
+        original_image_tensor = original_image_tensor.permute(2, 0, 1)
+        mask = mask.permute(2, 0, 1)
         
-        padded_image[mask == 1] = 0
-        masked_value_channels = np.unpackbits(np.uint8(padded_image.clip(0, 15))[:, :, np.newaxis], axis=2)[:, :, -num_value_channels:]
-        masked_image_tensor = np.stack([mask_channel, padding_channel] + [masked_value_channels[:, :, i] for i in range(num_value_channels)], axis=0)
-    
-        return (torch.tensor(original_image_tensor, dtype=torch.float32), torch.tensor(masked_image_tensor, dtype=torch.float32))
+        return original_image_tensor.float(), mask.float()
+
+def custom_collate_fn(batch):
+    """ Custom collate function to return just the batch (list of tuples) rather than concat / stacking into new tensor. """
+    return batch[0]

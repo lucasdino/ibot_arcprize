@@ -11,24 +11,17 @@ import datetime
 import time
 import math
 import json
-import numpy as np
-import random
 import utils
 import models
 import torch
+import numpy as np
 import torch.nn as nn
-import torch.distributed as dist
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 
 from pathlib import Path
-from PIL import Image
-from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
 from tensorboardX import SummaryWriter
-from models.head import iBOTHead
-from loader import ImageFolderMask
-from evaluation.unsupervised.unsup_cls import eval_pred
 from ibot_loader import get_dataset, iBOT_DatasetWrapper
 
 def get_args_parser():
@@ -138,17 +131,14 @@ def get_args_parser():
     parser.add_argument('--saveckp_freq', default=40, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=1, type=int, help='Number of data loading workers per GPU.')
-    parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
-        distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     return parser
 
 def train_ibot(args):
-    utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
-    cudnn.benchmark = True
+    # cudnn.benchmark = True
 
 
     # ============ preparing data ... ============
@@ -287,16 +277,12 @@ def train_ibot(args):
     start_time = time.time()
     print("Starting iBOT training!")
     for epoch in range(start_epoch, args.epochs):
-        data_loader.sampler.set_epoch(epoch)
-        data_loader.dataset.set_epoch(epoch)
-
+        
         # ============ training one epoch of iBOT ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss,
-            ibot_dataloader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
+            data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
             epoch, fp16_scaler, args)
         
-        ### NEED TO UPDATE THE TRAIN_ONE_EPOCH FUNCTION to accept the ibot_dataloader
-
         # ============ writing logs ... ============
         save_dict = {
             'student': student.state_dict(),
@@ -325,7 +311,7 @@ def train_ibot(args):
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loader,
-                    optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
+                    optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
                     fp16_scaler, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
@@ -340,12 +326,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
         params_k.append(param_k)
     names_common = list(set(names_q) & set(names_k))
     params_q = [param_q for name_q, param_q in zip(names_q, params_q) if name_q in names_common]
-    params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common]
+    params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common] 
 
-    pred_labels, real_labels = [], []
-    for it, (images, labels, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        # update weight decay and learning rate according to their schedule
+    for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 100, header)):
+        # Images is a 'n x 5 x 32 x 32' tensor w/ n being the number of global views. Masks is a 'n x 1 x 32 x 32' tensor.
         it = len(data_loader) * epoch + it  # global training iteration
+        # update weight decay and learning rate according to their schedule
         for i, param_group in enumerate(optimizer.param_groups):
             param_group["lr"] = lr_schedule[it]
             if i == 0:  # only the first group is regularized
@@ -361,9 +347,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
             student_output = student(images[:args.global_crops_number], mask=masks[:args.global_crops_number])
             
             # get local views
-            student.module.backbone.masked_im_modeling = False
-            student_local_cls = student(images[args.global_crops_number:])[0] if len(images) > args.global_crops_number else None
-            student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
+            # student.module.backbone.masked_im_modeling = False
+            # student_local_cls = student(images[args.global_crops_number:])[0] if len(images) > args.global_crops_number else None
+            # student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
+            student_local_cls = None
 
             all_loss = ibot_loss(student_output, teacher_output, student_local_cls, masks, epoch)
             loss = all_loss.pop('loss')
@@ -375,12 +362,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
         # log statistics
         probs1 = teacher_output[0].chunk(args.global_crops_number)
         probs2 = student_output[0].chunk(args.global_crops_number)
-        pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1]) 
+        pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1])
         pred2 = utils.concat_all_gather(probs2[1].max(dim=1)[1])
         acc = (pred1 == pred2).sum() / pred1.size(0)
-        pred_labels.append(pred1)
-        real_labels.append(utils.concat_all_gather(labels.to(pred1.device)))
-
+        
         # student update
         optimizer.zero_grad()
         param_norms = None
@@ -416,15 +401,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
         metric_logger.update(acc=acc)
 
-    pred_labels = torch.cat(pred_labels).cpu().detach().numpy()
-    real_labels = torch.cat(real_labels).cpu().detach().numpy()
-    nmi, ari, fscore, adjacc = eval_pred(real_labels, pred_labels, calc_acc=False)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print("NMI: {}, ARI: {}, F: {}, ACC: {}".format(nmi, ari, fscore, adjacc))
     print("Averaged stats:", metric_logger)
     return_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    return_dict.update({"nmi": nmi, "ari": ari, "fscore": fscore, "adjacc": adjacc})
     return return_dict
 
 
@@ -514,14 +494,14 @@ class iBOTLoss(nn.Module):
         """
         Update center used for teacher output.
         """
+        # Compute the center for teacher_cls
         cls_center = torch.sum(teacher_cls, dim=0, keepdim=True)
-        dist.all_reduce(cls_center)
-        cls_center = cls_center / (len(teacher_cls) * dist.get_world_size())
+        cls_center = cls_center / len(teacher_cls)
         self.center = self.center * self.center_momentum + cls_center * (1 - self.center_momentum)
 
+        # Compute the center for teacher_patch
         patch_center = torch.sum(teacher_patch.mean(1), dim=0, keepdim=True)
-        dist.all_reduce(patch_center)
-        patch_center = patch_center / (len(teacher_patch) * dist.get_world_size())
+        patch_center = patch_center / len(teacher_patch)
         self.center2 = self.center2 * self.center_momentum2 + patch_center * (1 - self.center_momentum2)
 
 
