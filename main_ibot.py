@@ -22,7 +22,6 @@ import torch.nn.functional as F
 from pathlib import Path
 from torchvision import models as torchvision_models
 from tensorboardX import SummaryWriter
-from ibot_loader import get_dataset, iBOT_DatasetWrapper
 
 def get_args_parser():
     parser = argparse.ArgumentParser('iBOT', add_help=False)
@@ -53,11 +52,12 @@ def get_args_parser():
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_masked_im_modeling', default=True, type=utils.bool_flag,
         help="Whether to use masked image modeling (mim) in backbone (Default: True)")
-    parser.add_argument('--pred_ratio', default=0.3, type=float, nargs='+', help="""Ratio of partial prediction.
+    parser.add_argument('--pred_ratio_mean', default=0.3, type=float, nargs='+', help="""Ratio of partial prediction.
         If a list of ratio is specified, one of them will be randomly choosed for each patch.""")
     parser.add_argument('--pred_ratio_var', default=0, type=float, nargs='+', help="""Variance of partial prediction
         ratio. Length should be indentical to the length of pred_ratio. 0 for disabling. """)
-    parser.add_argument('--pred_shape', default='block', type=str, help="""Shape of partial prediction.""")
+    parser.add_argument('--pred_ratio_pad_divisor', default=5, type=float, nargs='+', help="""Amount to divide our pred
+        ratio by to determine the pred ratio for our padding. """)
     parser.add_argument('--pred_start_epoch', default=0, type=int, help="""Start epoch to perform masked
         image prediction. We typically set this to 50 for swin transformer. (Default: 0)""")
     parser.add_argument('--lambda1', default=1.0, type=float, help="""loss weight for dino
